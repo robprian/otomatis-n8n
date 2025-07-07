@@ -1,15 +1,3 @@
-I'll enhance the system prompt with more advanced methods and features for your crypto trading bot. Let me examine your repository structure first to understand the context better.
-
-<githubread>
-query: "What is the content of README.md in https://github.com/robprian/otomatis-n8n"
-</githubread>
-
-<lexical-code-search>
-query: "config system prompt"
-</lexical-code-search>
-
-Now, let me create an ultra-enhanced system prompt with cutting-edge trading methods and features:
-
 ## 🚀 Ultra-Enhanced System Prompt for Advanced Crypto Trading Bot
 
 ```markdown
