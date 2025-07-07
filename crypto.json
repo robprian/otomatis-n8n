@@ -1,0 +1,912 @@
+{
+  "name": "crypto",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "Every 3 Minutes",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        -2500,
+        180
+      ],
+      "id": "f09530e1-0f7e-45ab-b8b7-fab680223f33"
+    },
+    {
+      "parameters": {
+        "url": "https://api.bybit.com/v5/market/instruments-info?category=linear",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "name": "Fetch All Bybit Futures",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        -2300,
+        180
+      ],
+      "id": "4c56ac76-e035-40bc-aa94-d282f189e1cd"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter and scan altcoins from Bybit futures\nconst instruments = $json.result.list;\n\n// Filter criteria for potential altcoins\nconst filteredCoins = instruments.filter(instrument => {\n  // Only USDT pairs\n  if (!instrument.symbol.endsWith('USDT')) return false;\n  \n  // Exclude major coins and stablecoins\n  const excludeList = ['BTCUSDT', 'ETHUSDT', 'USDCUSDT', 'BUSDUSDT', 'DAIUSDT', 'TUSDUSDT'];\n  if (excludeList.includes(instrument.symbol)) return false;\n  \n  // Only active trading pairs\n  if (instrument.status !== 'Trading') return false;\n  \n  // Must have decent volume (not delisted soon)\n  return true;\n});\n\n// Sort by symbol for consistency\nconst sortedCoins = filteredCoins.sort((a, b) => a.symbol.localeCompare(b.symbol));\n\n// Extract just the symbols\nconst symbols = sortedCoins.map(coin => coin.symbol);\n\nreturn {\n  json: {\n    total_instruments: instruments.length,\n    filtered_altcoins: symbols.length,\n    all_altcoins: symbols,\n    instrument_details: sortedCoins.map(coin => ({\n      symbol: coin.symbol,\n      status: coin.status,\n      lotSizeFilter: coin.lotSizeFilter,\n      priceFilter: coin.priceFilter\n    }))\n  }\n};"
+      },
+      "name": "Filter Altcoins",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -2100,
+        180
+      ],
+      "id": "cb0c1a27-af9a-43ca-bcd4-9095dd112c96"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get 24h ticker data for all altcoins to find potential watchlist candidates\nconst allAltcoins = $json.all_altcoins;\n\n// Split into batches of 50 for API rate limiting\nconst batchSize = 50;\nconst batches = [];\n\nfor (let i = 0; i < allAltcoins.length; i += batchSize) {\n  batches.push(allAltcoins.slice(i, i + batchSize));\n}\n\nreturn batches.map((batch, index) => ({ \n  json: { \n    batch_number: index + 1,\n    total_batches: batches.length,\n    symbols: batch \n  } \n}));"
+      },
+      "name": "Split Altcoins for Scanning",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -1900,
+        180
+      ],
+      "id": "702b0de0-01c8-4020-b2ab-b309a723d39c"
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "name": "Loop Altcoin Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 1,
+      "position": [
+        -1700,
+        180
+      ],
+      "id": "0cb23a40-8983-4fa3-b9d3-c1d533bfad81"
+    },
+    {
+      "parameters": {
+        "url": "https://api.bybit.com/v5/market/tickers?category=linear",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "name": "Fetch 24h Tickers",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        -1500,
+        180
+      ],
+      "id": "d4a9392a-0cfe-4c86-8844-7f19876b5330"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Analyze tickers and select potential altcoins based on criteria\nconst tickers = $json.result.list;\nconst currentBatch = $('Loop Altcoin Batches').item.json.symbols;\n\n// Filter tickers for current batch symbols\nconst batchTickers = tickers.filter(ticker => currentBatch.includes(ticker.symbol));\n\n// Scoring criteria for potential altcoins\nconst scoredCoins = batchTickers.map(ticker => {\n  const price = parseFloat(ticker.lastPrice);\n  const volume24h = parseFloat(ticker.volume24h);\n  const priceChange24h = parseFloat(ticker.price24hPcnt) * 100;\n  const turnover24h = parseFloat(ticker.turnover24h);\n  \n  let score = 0;\n  \n  // Volume criteria (higher volume = higher score)\n  if (volume24h > 1000000) score += 3;\n  else if (volume24h > 500000) score += 2;\n  else if (volume24h > 100000) score += 1;\n  \n  // Price movement criteria (moderate movement preferred)\n  const absPriceChange = Math.abs(priceChange24h);\n  if (absPriceChange > 2 && absPriceChange < 15) score += 2;\n  else if (absPriceChange > 15 && absPriceChange < 30) score += 1;\n  \n  // Turnover criteria\n  if (turnover24h > 10000000) score += 2;\n  else if (turnover24h > 5000000) score += 1;\n  \n  // Price range criteria (avoid very cheap or very expensive coins)\n  if (price > 0.01 && price < 1000) score += 1;\n  \n  return {\n    symbol: ticker.symbol,\n    price: price,\n    volume24h: volume24h,\n    priceChange24h: priceChange24h,\n    turnover24h: turnover24h,\n    score: score,\n    ticker_data: ticker\n  };\n});\n\n// Sort by score (highest first)\nconst sortedCoins = scoredCoins.sort((a, b) => b.score - a.score);\n\nreturn {\n  json: {\n    batch_number: $('Loop Altcoin Batches').item.json.batch_number,\n    analyzed_coins: sortedCoins.length,\n    scored_coins: sortedCoins\n  }\n};"
+      },
+      "name": "Score Altcoins",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -1300,
+        180
+      ],
+      "id": "6afd7585-148c-4eb3-a61f-30be87c47a0d"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aggregate all scored altcoins from all batches\nconst allBatches = $input.all();\nconst allScoredCoins = [];\n\n// Combine all scored coins from all batches\nallBatches.forEach(batch => {\n  if (batch.json.scored_coins) {\n    allScoredCoins.push(...batch.json.scored_coins);\n  }\n});\n\n// Sort all coins by score (highest first)\nconst sortedAllCoins = allScoredCoins.sort((a, b) => b.score - a.score);\n\n// Select top performing altcoins for watchlist\nconst topCoins = sortedAllCoins.slice(0, 20); // Top 20 altcoins\n\n// Create final watchlist with additional filtering\nconst watchlist = topCoins.filter(coin => {\n  // Additional filters\n  return coin.score >= 3 && // Minimum score\n         coin.volume24h > 200000 && // Minimum volume\n         Math.abs(coin.priceChange24h) < 50; // Avoid extreme pumps/dumps\n}).slice(0, 10); // Final top 10\n\n// Extract just the symbols for trading\nconst watchlistSymbols = watchlist.map(coin => coin.symbol);\n\n// Add some stable performers if watchlist is too small\nif (watchlistSymbols.length < 5) {\n  const stableCoins = ['SOLUSDT', 'ADAUSDT', 'DOGEUSDT', 'MATICUSDT', 'AVAXUSDT'];\n  stableCoins.forEach(coin => {\n    if (!watchlistSymbols.includes(coin)) {\n      watchlistSymbols.push(coin);\n    }\n  });\n}\n\nreturn {\n  json: {\n    total_analyzed: allScoredCoins.length,\n    top_performers: topCoins.length,\n    final_watchlist: watchlistSymbols.length,\n    symbols: watchlistSymbols,\n    watchlist_details: watchlist,\n    analysis_summary: {\n      avg_score: watchlist.reduce((sum, coin) => sum + coin.score, 0) / watchlist.length,\n      avg_volume: watchlist.reduce((sum, coin) => sum + coin.volume24h, 0) / watchlist.length,\n      avg_price_change: watchlist.reduce((sum, coin) => sum + coin.priceChange24h, 0) / watchlist.length\n    }\n  }\n};"
+      },
+      "name": "Create Dynamic Watchlist",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -1100,
+        180
+      ],
+      "id": "f20b30a1-cdcf-4d32-b19a-90a8bea87a3a"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Use dynamic watchlist symbols\nconst symbols = $json.symbols;\nreturn symbols.map(symbol => ({ json: { symbol } }));"
+      },
+      "name": "Split Watchlist Symbols",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -900,
+        180
+      ],
+      "id": "dbb68622-0998-4616-bae0-c7a535e3968f"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Batch Analyze Multiple Tokens for Efficiency\n// Get all input items from Split Watchlist Symbols\nconst allInputs = $input.all();\n\n// Extract symbols from all inputs\nconst symbols = allInputs.map(item => item.json.symbol);\n\n// Split into smaller batches of 3-5 tokens for ML/AI analysis\nconst batchSize = 3;\nconst batches = [];\n\nfor (let i = 0; i < symbols.length; i += batchSize) {\n  batches.push(symbols.slice(i, i + batchSize));\n}\n\nreturn batches.map((batch, index) => ({ \n  json: { \n    batch_number: index + 1,\n    total_batches: batches.length,\n    symbols: batch,\n    batch_size: batch.length\n  } \n}));"
+      },
+      "name": "Create Analysis Batches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -720,
+        180
+      ],
+      "id": "2bd6b848-f1de-4554-bbde-16c74648ba42"
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "name": "Loop Analysis Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 1,
+      "position": [
+        -560,
+        180
+      ],
+      "id": "6692c651-4ebc-472f-94cf-d8195d376b6d"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Batch Fetch OHLCV Data for Multiple Symbols\nconst batch = $('Loop Analysis Batches').item.json;\nconst symbols = batch.symbols;\n\n// Fetch OHLCV data for all symbols in batch\nconst promises = symbols.map(async (symbol) => {\n  try {\n    const response = await fetch(`https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=15&limit=30`);\n    const data = await response.json();\n    return {\n      symbol: symbol,\n      success: true,\n      data: data\n    };\n  } catch (error) {\n    return {\n      symbol: symbol,\n      success: false,\n      error: error.message\n    };\n  }\n});\n\n// Wait for all requests to complete\nconst results = await Promise.all(promises);\n\nreturn {\n  json: {\n    batch_number: batch.batch_number,\n    total_batches: batch.total_batches,\n    symbols_count: symbols.length,\n    results: results\n  }\n};"
+      },
+      "name": "Batch Fetch OHLCV",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -400,
+        180
+      ],
+      "id": "5648d949-44f1-44c5-a54f-79de073511f2"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Enhanced Batch Technical Analysis with Multiple Candlestick Patterns\nconst batchData = $json;\nconst analysisResults = [];\n\n// Process each symbol in the batch\nfor (const result of batchData.results) {\n  if (!result.success || !result.data || !result.data.result) {\n    console.log(`Failed to get data for ${result.symbol}:`, result.error || 'No data');\n    continue;\n  }\n\n  const data = result.data.result.list;\n  const symbol = result.symbol;\n\n  // Parse OHLCV data\n  const ohlcv = data.map(item => ({\n    timestamp: parseInt(item[0]),\n    open: parseFloat(item[1]),\n    high: parseFloat(item[2]),\n    low: parseFloat(item[3]),\n    close: parseFloat(item[4]),\n    volume: parseFloat(item[5])\n  })).reverse();\n\n  // RSI Calculation\n  function calculateRSI(prices, period = 14) {\n    const gains = [];\n    const losses = [];\n    \n    for (let i = 1; i < prices.length; i++) {\n      const change = prices[i] - prices[i - 1];\n      gains.push(change > 0 ? change : 0);\n      losses.push(change < 0 ? Math.abs(change) : 0);\n    }\n    \n    const avgGain = gains.slice(-period).reduce((a, b) => a + b, 0) / period;\n    const avgLoss = losses.slice(-period).reduce((a, b) => a + b, 0) / period;\n    \n    const rs = avgGain / avgLoss;\n    return 100 - (100 / (1 + rs));\n  }\n\n  // MACD Calculation\n  function calculateMACD(prices) {\n    const ema12 = calculateEMA(prices, 12);\n    const ema26 = calculateEMA(prices, 26);\n    const macdLine = ema12 - ema26;\n    const signalLine = calculateEMA([macdLine], 9);\n    \n    return {\n      macd: macdLine,\n      signal: signalLine,\n      histogram: macdLine - signalLine\n    };\n  }\n\n  function calculateEMA(prices, period) {\n    const multiplier = 2 / (period + 1);\n    let ema = prices[0];\n    \n    for (let i = 1; i < prices.length; i++) {\n      ema = (prices[i] * multiplier) + (ema * (1 - multiplier));\n    }\n    \n    return ema;\n  }\n\n  // Enhanced Candlestick Pattern Detection\n  function detectCandlestickPatterns(candles) {\n    const patterns = [];\n    const len = candles.length;\n    \n    if (len < 3) return patterns;\n    \n    const current = candles[len - 1];\n    const previous = candles[len - 2];\n    const beforePrevious = candles[len - 3];\n    \n    // Helper functions\n    const isBullish = (candle) => candle.close > candle.open;\n    const isBearish = (candle) => candle.close < candle.open;\n    const getBodySize = (candle) => Math.abs(candle.close - candle.open);\n    const getUpperShadow = (candle) => candle.high - Math.max(candle.open, candle.close);\n    const getLowerShadow = (candle) => Math.min(candle.open, candle.close) - candle.low;\n    const getRange = (candle) => candle.high - candle.low;\n    \n    // Bullish Engulfing\n    if (isBearish(previous) && isBullish(current) &&\n        current.open < previous.close && current.close > previous.open) {\n      patterns.push('BULLISH_ENGULFING');\n    }\n    \n    // Bearish Engulfing\n    if (isBullish(previous) && isBearish(current) &&\n        current.open > previous.close && current.close < previous.open) {\n      patterns.push('BEARISH_ENGULFING');\n    }\n    \n    const currentBody = getBodySize(current);\n    const currentLowerShadow = getLowerShadow(current);\n    const currentUpperShadow = getUpperShadow(current);\n    \n    // Hammer\n    if (currentLowerShadow > currentBody * 2 && currentUpperShadow < currentBody * 0.5) {\n      patterns.push('HAMMER');\n    }\n    \n    // Doji\n    if (currentBody < getRange(current) * 0.1) {\n      patterns.push('DOJI');\n    }\n    \n    // Shooting Star\n    if (currentUpperShadow > currentBody * 2 && currentLowerShadow < currentBody * 0.5) {\n      patterns.push('SHOOTING_STAR');\n    }\n    \n    // Morning Star Pattern\n    if (len >= 3 && isBearish(beforePrevious) && \n        getBodySize(previous) < getBodySize(beforePrevious) * 0.5 &&\n        isBullish(current) && current.close > (beforePrevious.open + beforePrevious.close) / 2) {\n      patterns.push('MORNING_STAR');\n    }\n    \n    // Evening Star Pattern\n    if (len >= 3 && isBullish(beforePrevious) && \n        getBodySize(previous) < getBodySize(beforePrevious) * 0.5 &&\n        isBearish(current) && current.close < (beforePrevious.open + beforePrevious.close) / 2) {\n      patterns.push('EVENING_STAR');\n    }\n    \n    // Marubozu (long body with minimal shadows)\n    if (currentUpperShadow < currentBody * 0.1 && currentLowerShadow < currentBody * 0.1) {\n      patterns.push(isBullish(current) ? 'BULLISH_MARUBOZU' : 'BEARISH_MARUBOZU');\n    }\n    \n    // Spinning Top\n    if (currentBody < getRange(current) * 0.3 && \n        currentUpperShadow > currentBody * 0.5 && \n        currentLowerShadow > currentBody * 0.5) {\n      patterns.push('SPINNING_TOP');\n    }\n    \n    return patterns.length > 0 ? patterns : ['NONE'];\n  }\n\n  // Volume Analysis\n  function detectVolumeSpike(candles) {\n    const avgVolume = candles.slice(-10).reduce((sum, candle) => sum + candle.volume, 0) / 10;\n    const currentVolume = candles[candles.length - 1].volume;\n    \n    return {\n      spike: currentVolume > avgVolume * 1.5,\n      ratio: currentVolume / avgVolume,\n      current: currentVolume,\n      average: avgVolume\n    };\n  }\n\n  // Support and Resistance Detection\n  function findSupportResistance(candles) {\n    const highs = candles.map(c => c.high);\n    const lows = candles.map(c => c.low);\n    \n    // Find recent high and low levels\n    const recentHighs = highs.slice(-10);\n    const recentLows = lows.slice(-10);\n    \n    const resistance = Math.max(...recentHighs);\n    const support = Math.min(...recentLows);\n    \n    return {\n      resistance: resistance,\n      support: support,\n      current_distance_to_resistance: ((resistance - candles[candles.length - 1].close) / candles[candles.length - 1].close) * 100,\n      current_distance_to_support: ((candles[candles.length - 1].close - support) / candles[candles.length - 1].close) * 100\n    };\n  }\n\n  // Calculate all indicators\n  const closes = ohlcv.map(item => item.close);\n  const rsi = calculateRSI(closes);\n  const macd = calculateMACD(closes);\n  const candlestickPatterns = detectCandlestickPatterns(ohlcv);\n  const volumeSpike = detectVolumeSpike(ohlcv);\n  const supportResistance = findSupportResistance(ohlcv);\n  const currentPrice = ohlcv[ohlcv.length - 1].close;\n\n  // Add the analysis result to the batch results\n  analysisResults.push({\n    symbol: symbol,\n    currentPrice: currentPrice,\n    rsi: rsi,\n    macd: macd,\n    candlestick_patterns: candlestickPatterns,\n    engulfing: {\n      bullish: candlestickPatterns.includes('BULLISH_ENGULFING'),\n      bearish: candlestickPatterns.includes('BEARISH_ENGULFING'),\n      pattern: candlestickPatterns.includes('BULLISH_ENGULFING') ? 'BULLISH_ENGULFING' : \n               candlestickPatterns.includes('BEARISH_ENGULFING') ? 'BEARISH_ENGULFING' : 'NONE'\n    },\n    volumeSpike: volumeSpike,\n    support_resistance: supportResistance,\n    timestamp: new Date().toISOString()\n  });\n}\n\n// Return the batch results\nreturn {\n  json: {\n    batch_number: batchData.batch_number,\n    total_batches: batchData.total_batches,\n    analyzed_count: analysisResults.length,\n    analysis_results: analysisResults\n  }\n};"
+      },
+      "name": "Batch TA+Patterns Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -240,
+        180
+      ],
+      "id": "5ca035de-1640-4187-80d1-280a25945215"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api-inference.huggingface.co/models/ProsusAI/finbert",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$credentials.token}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "inputs",
+              "value": "=Analyzing crypto market sentiment for {{$('TA+Pattern+Volume').item.json.symbol}}: Current price ${{$('TA+Pattern+Volume').item.json.currentPrice}}, RSI {{Math.round($('TA+Pattern+Volume').item.json.rsi)}}, MACD {{$('TA+Pattern+Volume').item.json.macd.macd > 0 ? 'bullish' : 'bearish'}}, Pattern: {{$('TA+Pattern+Volume').item.json.engulfing.pattern}}, Candlestick Patterns: {{$('TA+Pattern+Volume').item.json.candlestick_patterns.join(', ')}}, Volume spike: {{$('TA+Pattern+Volume').item.json.volumeSpike.spike ? 'detected' : 'normal'}}. Market conditions suggest {{$('TA+Pattern+Volume').item.json.rsi > 70 ? 'overbought levels' : $('TA+Pattern+Volume').item.json.rsi < 30 ? 'oversold opportunity' : 'neutral momentum'}}. Support/Resistance: Support at ${{$('TA+Pattern+Volume').item.json.support_resistance.support}}, Resistance at ${{$('TA+Pattern+Volume').item.json.support_resistance.resistance}}."
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "name": "FinBERT Sentiment Analysis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        80,
+        60
+      ],
+      "id": "a51c9395-b0d3-4297-b5da-a76e8114279b",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "iNYlhESi5WHZXiGk",
+          "name": "huggingface-robprian"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api-inference.huggingface.co/models/nlptown/bert-base-multilingual-uncased-sentiment",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$credentials.token}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "inputs",
+              "value": "=Crypto market analysis for {{$('TA+Pattern+Volume').item.json.symbol}}: Price action shows {{$('TA+Pattern+Volume').item.json.engulfing.pattern !== 'NONE' ? 'significant pattern formation' : 'stable movement'}} with {{$('TA+Pattern+Volume').item.json.volumeSpike.spike ? 'high volume activity' : 'normal trading volume'}}. Technical indicators signal {{$('TA+Pattern+Volume').item.json.rsi > 70 ? 'potential resistance' : $('TA+Pattern+Volume').item.json.rsi < 30 ? 'potential support' : 'balanced market'}}. MACD trend is {{$('TA+Pattern+Volume').item.json.macd.macd > 0 ? 'positive momentum' : 'negative momentum'}}. Detected candlestick patterns: {{$('TA+Pattern+Volume').item.json.candlestick_patterns.join(', ')}}. Support/Resistance levels: Support ${{$('TA+Pattern+Volume').item.json.support_resistance.support}}, Resistance ${{$('TA+Pattern+Volume').item.json.support_resistance.resistance}}."
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "name": "BERT Multilingual Sentiment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        100,
+        260
+      ],
+      "id": "34452e2a-780b-4eb3-968f-5e1fba851ae5",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "iNYlhESi5WHZXiGk",
+          "name": "huggingface-robprian"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "name": "Merge Sentiments",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [
+        320,
+        -120
+      ],
+      "id": "cc079275-2496-4485-b096-6b4a97fff1f9"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Combine sentiment analysis results from multiple models\n// The merge node combines both sentiment analysis results\nconst mergedData = $input.all();\n\n// Get technical analysis data\nlet taData = null;\ntry {\n  taData = $('TA+Pattern+Volume').item.json;\n} catch (e) {\n  console.log('Could not get TA data:', e.message);\n  throw new Error('Technical analysis data not found');\n}\n\n// Extract sentiment data from merged inputs\nlet finbertData = null;\nlet bertData = null;\n\n// Process merged data to find sentiment results\nfor (const item of mergedData) {\n  const data = item.json;\n  \n  // Check if this is a valid sentiment response\n  if (data && Array.isArray(data) && data.length > 0 && data[0].label) {\n    if (!finbertData) {\n      finbertData = data;\n    } else {\n      bertData = data;\n    }\n  }\n  \n  // Handle error responses\n  if (data && data.error) {\n    console.log('Sentiment API Error:', data.error);\n  }\n}\n\n// Parse FinBERT results (financial sentiment)\nlet finbertSentiment = { label: 'neutral', score: 0.5 };\nif (finbertData && Array.isArray(finbertData) && finbertData.length > 0) {\n  finbertSentiment = finbertData[0];\n}\n\n// Parse BERT results (general sentiment)\nlet bertSentiment = { label: 'NEUTRAL', score: 0.5 };\nif (bertData && Array.isArray(bertData) && bertData.length > 0) {\n  bertSentiment = bertData[0];\n}\n\n// Convert sentiment labels to standardized format\nfunction standardizeSentiment(sentiment) {\n  const label = sentiment.label.toLowerCase();\n  if (label.includes('positive') || label.includes('bullish')) {\n    return { label: 'POSITIVE', score: sentiment.score };\n  } else if (label.includes('negative') || label.includes('bearish')) {\n    return { label: 'NEGATIVE', score: sentiment.score };\n  } else {\n    return { label: 'NEUTRAL', score: sentiment.score };\n  }\n}\n\nconst standardizedFinbert = standardizeSentiment(finbertSentiment);\nconst standardizedBert = standardizeSentiment(bertSentiment);\n\n// Calculate combined sentiment score\nconst combinedScore = (standardizedFinbert.score + standardizedBert.score) / 2;\n\n// Determine overall sentiment\nlet overallSentiment = 'NEUTRAL';\nif (combinedScore > 0.6) {\n  overallSentiment = 'POSITIVE';\n} else if (combinedScore < 0.4) {\n  overallSentiment = 'NEGATIVE';\n}\n\n// Create comprehensive sentiment analysis\nconst sentimentAnalysis = {\n  combined: {\n    label: overallSentiment,\n    score: combinedScore,\n    confidence: Math.abs(combinedScore - 0.5) * 2 // 0-1 scale\n  },\n  finbert: standardizedFinbert,\n  bert: standardizedBert,\n  analysis: {\n    agreement: standardizedFinbert.label === standardizedBert.label,\n    strength: Math.abs(combinedScore - 0.5) > 0.2 ? 'STRONG' : 'WEAK'\n  }\n};\n\nreturn {\n  json: {\n    symbol: taData.symbol,\n    technical_analysis: {\n      rsi: taData.rsi,\n      macd: taData.macd,\n      engulfing: taData.engulfing,\n      candlestick_patterns: taData.candlestick_patterns || ['NONE'],\n      volume_spike: taData.volumeSpike,\n      support_resistance: taData.support_resistance,\n      current_price: taData.currentPrice\n    },\n    sentiment: sentimentAnalysis,\n    timestamp: new Date().toISOString(),\n    debug: {\n      merged_inputs: mergedData.length,\n      finbert_available: !!finbertData,\n      bert_available: !!bertData,\n      ta_available: !!taData\n    }\n  }\n};"
+      },
+      "name": "Combine Sentiment Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        500,
+        -120
+      ],
+      "id": "80f374f6-e14c-4a85-b854-8d192f257474",
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama3-groq-70b-8192-tool-use-preview\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an expert crypto AI analyst and capital management specialist. Analyze technical indicators, patterns, and advanced sentiment analysis to provide precise trading decisions. Always respond in JSON format with specific entry plans.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"COMPREHENSIVE ANALYSIS DATA:\\n\\nPair: \" + $json.symbol + \"\\nCurrent Price: $\" + $json.technical_analysis.current_price + \"\\n\\nTECHNICAL INDICATORS:\\n• RSI: \" + $json.technical_analysis.rsi + \" (\" + ($json.technical_analysis.rsi > 70 ? 'OVERBOUGHT' : $json.technical_analysis.rsi < 30 ? 'OVERSOLD' : 'NEUTRAL') + \")\\n• MACD: \" + $json.technical_analysis.macd.macd + \" (\" + ($json.technical_analysis.macd.macd > 0 ? 'BULLISH' : 'BEARISH') + \")\\n• Pattern: \" + $json.technical_analysis.engulfing.pattern + \"\\n• Candlestick Patterns: \" + $json.technical_analysis.candlestick_patterns.join(', ') + \"\\n• Volume Spike: \" + ($json.technical_analysis.volume_spike.spike ? 'YES' : 'NO') + \" (\" + $json.technical_analysis.volume_spike.ratio + \"x)\\n\\nADVANCED SENTIMENT ANALYSIS:\\n• Combined Sentiment: \" + $json.sentiment.combined.label + \" (\" + Math.round($json.sentiment.combined.score * 100) + \"%)\\n• FinBERT (Financial): \" + $json.sentiment.finbert.label + \" (\" + Math.round($json.sentiment.finbert.score * 100) + \"%)\\n• BERT (General): \" + $json.sentiment.bert.label + \" (\" + Math.round($json.sentiment.bert.score * 100) + \"%)\\n• Sentiment Agreement: \" + ($json.sentiment.analysis.agreement ? 'YES' : 'NO') + \"\\n• Sentiment Strength: \" + $json.sentiment.analysis.strength + \"\\n\\nRISK MANAGEMENT:\\n• Capital: $10\\n• Target Multiplier: 2x-5x-10x\\n• Max Risk: 2% per trade\\n\\nProvide trading decision in JSON format:\\n{\\n  \\\"action\\\": \\\"BUY|SELL|HOLD\\\",\\n  \\\"direction\\\": \\\"LONG|SHORT|NONE\\\",\\n  \\\"confidence\\\": 0-100,\\n  \\\"entry_price\\\": number,\\n  \\\"lot_size\\\": number,\\n  \\\"take_profit\\\": number,\\n  \\\"stop_loss\\\": number,\\n  \\\"risk_reward_ratio\\\": number,\\n  \\\"estimated_profit\\\": number,\\n  \\\"predicted_balance\\\": number,\\n  \\\"reasoning\\\": \\\"detailed explanation including technical and sentiment factors\\\"\\n}\"\n    }\n  ],\n  \"temperature\": 0.1,\n  \"max_tokens\": 1200\n}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "name": "Groq AI Enhanced Decision",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        660,
+        -120
+      ],
+      "id": "44f6c62e-8e7a-43fe-a160-a4063b2d0a65",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "azoV6PgQNti8H60z",
+          "name": "groq-robrian"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Enhanced Groq AI Response with Advanced Sentiment\nconst response = $json.choices[0].message.content;\nconst combinedData = $('Combine Sentiment Analysis').item.json;\n\nlet aiDecision;\ntry {\n  // Try to parse JSON response from Groq\n  const jsonMatch = response.match(/\\{[\\s\\S]*\\}/);\n  if (jsonMatch) {\n    aiDecision = JSON.parse(jsonMatch[0]);\n  } else {\n    // Fallback parsing if JSON is not properly formatted\n    aiDecision = {\n      action: \"HOLD\",\n      direction: \"NONE\",\n      confidence: 50,\n      entry_price: combinedData.technical_analysis.current_price,\n      lot_size: 0.01,\n      take_profit: combinedData.technical_analysis.current_price * 1.02,\n      stop_loss: combinedData.technical_analysis.current_price * 0.98,\n      risk_reward_ratio: 2,\n      estimated_profit: 0,\n      predicted_balance: 10,\n      reasoning: \"Unable to parse AI response, holding position\"\n    };\n  }\n} catch (error) {\n  aiDecision = {\n    action: \"HOLD\",\n    direction: \"NONE\",\n    confidence: 50,\n    entry_price: combinedData.technical_analysis.current_price,\n    lot_size: 0.01,\n    take_profit: combinedData.technical_analysis.current_price * 1.02,\n    stop_loss: combinedData.technical_analysis.current_price * 0.98,\n    risk_reward_ratio: 2,\n    estimated_profit: 0,\n    predicted_balance: 10,\n    reasoning: \"Error parsing AI response: \" + error.message\n  };\n}\n\n// Enhanced decision with sentiment confidence weighting\nif (aiDecision.confidence && combinedData.sentiment.combined.confidence) {\n  // Adjust confidence based on sentiment agreement and strength\n  const sentimentWeight = combinedData.sentiment.analysis.agreement ? 1.1 : 0.9;\n  const strengthWeight = combinedData.sentiment.analysis.strength === 'STRONG' ? 1.05 : 0.95;\n  \n  aiDecision.confidence = Math.min(95, Math.max(5, \n    aiDecision.confidence * sentimentWeight * strengthWeight\n  ));\n}\n\nreturn {\n  json: {\n    symbol: combinedData.symbol,\n    timestamp: new Date().toISOString(),\n    technical_analysis: combinedData.technical_analysis,\n    sentiment: combinedData.sentiment,\n    ai_decision: aiDecision,\n    raw_groq_response: response,\n    enhanced_features: {\n      sentiment_models: ['FinBERT', 'BERT-Multilingual'],\n      sentiment_agreement: combinedData.sentiment.analysis.agreement,\n      sentiment_strength: combinedData.sentiment.analysis.strength,\n      combined_confidence: Math.round(combinedData.sentiment.combined.confidence * 100)\n    }\n  }\n};"
+      },
+      "name": "Parse Enhanced AI Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        820,
+        -120
+      ],
+      "id": "ef0c56e7-a5ab-4ede-afd6-f1ed273b8606"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.ai_decision.action}}",
+              "operation": "notEqual",
+              "value2": "HOLD"
+            },
+            {
+              "value1": "={{$json.ai_decision.confidence}}",
+              "operation": "largerEqual",
+              "value2": "70"
+            }
+          ]
+        }
+      },
+      "name": "Should Execute Trade?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        540,
+        180
+      ],
+      "id": "fe9cef52-9dc6-4752-8a72-6f7b3fc435dc"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate proper Bybit API authentication headers\nconst crypto = require('crypto');\n\n// Get credentials from n8n credential system\n// Note: You need to configure Bybit API credentials in n8n\n// For security, we'll use environment variables or credential system\nconst apiKey = process.env.BYBIT_API_KEY || $credentials.bybit?.apiKey || 'CONFIGURE_BYBIT_API_KEY';\nconst apiSecret = process.env.BYBIT_API_SECRET || $credentials.bybit?.apiSecret || 'CONFIGURE_BYBIT_API_SECRET';\nconst timestamp = Date.now().toString();\nconst recvWindow = '5000';\n\n// Prepare the data to be signed\nconst orderData = {\n  category: 'linear',\n  symbol: $json.symbol,\n  side: $json.ai_decision.action === 'BUY' ? 'Buy' : 'Sell',\n  orderType: 'Market',\n  qty: String($json.ai_decision.lot_size),\n  timeInForce: 'IOC',\n  positionIdx: 0,\n  orderLinkId: `ai-bot-${$json.symbol}-${timestamp}`\n};\n\n// Create the JSON body string\nconst jsonBodyString = JSON.stringify(orderData);\n\n// Create the string to be signed (for POST requests)\nconst stringToSign = timestamp + apiKey + recvWindow + jsonBodyString;\n\n// Generate HMAC SHA256 signature\nconst signature = crypto\n  .createHmac('sha256', apiSecret)\n  .update(stringToSign)\n  .digest('hex');\n\nreturn {\n  json: {\n    ...orderData,\n    headers: {\n      'Content-Type': 'application/json',\n      'X-BAPI-API-KEY': apiKey,\n      'X-BAPI-TIMESTAMP': timestamp,\n      'X-BAPI-RECV-WINDOW': recvWindow,\n      'X-BAPI-SIGN': signature\n    },\n    body: jsonBodyString,\n    timestamp: timestamp,\n    original_data: $json\n  }\n};"
+      },
+      "name": "Prepare Bybit Order with Auth",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        760,
+        180
+      ],
+      "id": "16a1990a-2cb2-4c41-ab26-8cf143c1f162"
+    },
+    {
+      "parameters": {
+        "chatId": "7886257621",
+        "text": "=🤖 *Enhanced AI Crypto Signal*\n\n📊 *{{$json.symbol}}*\n💰 Price: ${{$json.technical_analysis.current_price}}\n\n📈 *Technical Analysis:*\n• RSI: {{Math.round($json.technical_analysis.rsi * 100) / 100}} ({{$json.technical_analysis.rsi > 70 ? 'OVERBOUGHT' : $json.technical_analysis.rsi < 30 ? 'OVERSOLD' : 'NEUTRAL'}})\n• MACD: {{$json.technical_analysis.macd.macd > 0 ? '🟢' : '🔴'}} {{Math.round($json.technical_analysis.macd.macd * 10000) / 10000}}\n• Pattern: {{$json.technical_analysis.engulfing.pattern}}\n• Volume: {{$json.technical_analysis.volume_spike.spike ? '🚀 SPIKE' : '📊 Normal'}} ({{Math.round($json.technical_analysis.volume_spike.ratio * 100) / 100}}x)\n\n🧠 *Advanced Sentiment Analysis:*\n• Combined: {{$json.sentiment.combined.label}} ({{Math.round($json.sentiment.combined.score * 100)}}%)\n• FinBERT: {{$json.sentiment.finbert.label}} ({{Math.round($json.sentiment.finbert.score * 100)}}%)\n• BERT: {{$json.sentiment.bert.label}} ({{Math.round($json.sentiment.bert.score * 100)}}%)\n• Agreement: {{$json.sentiment.analysis.agreement ? '✅ YES' : '❌ NO'}}\n• Strength: {{$json.sentiment.analysis.strength}}\n\n🎯 *AI Decision:*\n• Action: {{$json.ai_decision.action === 'BUY' ? '🟢 BUY' : $json.ai_decision.action === 'SELL' ? '🔴 SELL' : '⚪ HOLD'}}\n• Direction: {{$json.ai_decision.direction}}\n• Confidence: {{$json.ai_decision.confidence}}%\n• Entry: ${{$json.ai_decision.entry_price}}\n• TP: ${{$json.ai_decision.take_profit}}\n• SL: ${{$json.ai_decision.stop_loss}}\n• Lot: {{$json.ai_decision.lot_size}}\n• R:R = {{$json.ai_decision.risk_reward_ratio}}\n• Est. Profit: ${{$json.ai_decision.estimated_profit}}\n• Pred. Balance: ${{$json.ai_decision.predicted_balance}}\n\n💡 *Enhanced Reasoning:*\n{{$json.ai_decision.reasoning}}\n\n⏰ {{$json.timestamp}}",
+        "additionalFields": {}
+      },
+      "name": "Telegram Enhanced Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        980,
+        420
+      ],
+      "id": "3f3c4c6d-6d62-4243-ae10-ea2690cc03a0",
+      "webhookId": "8345bd60-076f-4dd8-850b-1d84a5581c65"
+    },
+    {
+      "parameters": {
+        "url": "https://api.bybit.com/v5/order/create",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "={{$json.headers['Content-Type']}}"
+            },
+            {
+              "name": "X-BAPI-API-KEY",
+              "value": "={{$json.headers['X-BAPI-API-KEY']}}"
+            },
+            {
+              "name": "X-BAPI-TIMESTAMP",
+              "value": "={{$json.headers['X-BAPI-TIMESTAMP']}}"
+            },
+            {
+              "name": "X-BAPI-RECV-WINDOW",
+              "value": "={{$json.headers['X-BAPI-RECV-WINDOW']}}"
+            },
+            {
+              "name": "X-BAPI-SIGN",
+              "value": "={{$json.headers['X-BAPI-SIGN']}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {}
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "name": "Bybit Auto Order",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        900,
+        280
+      ],
+      "id": "e911b5b1-a6be-440b-84d7-fa71aab4bbfd"
+    },
+    {
+      "parameters": {
+        "url": "https://api.bybit.com/v5/position/trading-stop",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "bybitApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-BAPI-API-KEY",
+              "value": "={{$credentials.apiKey}}"
+            },
+            {
+              "name": "X-BAPI-TIMESTAMP",
+              "value": "={{Date.now()}}"
+            },
+            {
+              "name": "X-BAPI-RECV-WINDOW",
+              "value": "5000"
+            },
+            {
+              "name": "X-BAPI-SIGN",
+              "value": "={{$credentials.signature}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "category",
+              "value": "linear"
+            },
+            {
+              "name": "symbol",
+              "value": "={{$json.symbol}}"
+            },
+            {
+              "name": "takeProfit",
+              "value": "={{String($json.ai_decision.take_profit)}}"
+            },
+            {
+              "name": "stopLoss",
+              "value": "={{String($json.ai_decision.stop_loss)}}"
+            },
+            {
+              "name": "positionIdx",
+              "value": 0
+            },
+            {
+              "name": "tpslMode",
+              "value": "Full"
+            },
+            {
+              "name": "tpOrderType",
+              "value": "Market"
+            },
+            {
+              "name": "slOrderType",
+              "value": "Market"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "name": "Set TP/SL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1000,
+        260
+      ],
+      "id": "7fc6a89f-7a77-45bb-bb5c-0dddddc20b81"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": "GOOGLE_SHEET_ID",
+        "sheetName": "TradingLog",
+        "options": {}
+      },
+      "name": "Log to Google Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 3,
+      "position": [
+        1180,
+        100
+      ],
+      "id": "26b25ce1-1df5-430f-95d7-012456dc2036"
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "=ℹ️ *Signal Analysis Only*\n\n📊 *{{$json.symbol}}*\n💰 Price: ${{$json.technical_analysis.current_price}}\n\n🧠 *AI Decision:* {{$json.ai_decision.action}} ({{$json.ai_decision.confidence}}%)\n\n⚠️ *No Trade Executed*\n• Reason: {{$json.ai_decision.confidence < 70 ? 'Low confidence' : 'HOLD recommendation'}}\n• RSI: {{Math.round($json.technical_analysis.rsi * 100) / 100}}\n• Pattern: {{$json.technical_analysis.engulfing.pattern}}\n• Combined Sentiment: {{$json.sentiment.combined.label}}\n• Sentiment Agreement: {{$json.sentiment.analysis.agreement ? 'YES' : 'NO'}}\n\n⏰ {{$json.timestamp}}",
+        "additionalFields": {}
+      },
+      "name": "Telegram No Trade Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        540
+      ],
+      "id": "3e06fed4-8ebc-4012-be83-9de32a349854",
+      "webhookId": "601110e6-8ed0-4db9-b433-1d4482d80ee9"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process Batch Results and Split into Individual Items for Sentiment Analysis\nconst batchData = $json;\nconst results = [];\n\nconsole.log('Received batch data:', JSON.stringify(batchData, null, 2));\n\n// Handle different data structures\nlet analysisResults = [];\n\n// Check if we have analysis results from the batch\nif (batchData.analysis_results && Array.isArray(batchData.analysis_results)) {\n  analysisResults = batchData.analysis_results;\n} else if (batchData.scored_coins && Array.isArray(batchData.scored_coins)) {\n  // Handle scored coins format\n  analysisResults = batchData.scored_coins.map(coin => ({\n    symbol: coin.symbol,\n    currentPrice: coin.price,\n    rsi: 50, // Default RSI if not available\n    macd: { macd: 0, signal: 0, histogram: 0 },\n    candlestick_patterns: ['NONE'],\n    engulfing: { bullish: false, bearish: false, pattern: 'NONE' },\n    volumeSpike: { spike: false, ratio: 1, current: coin.volume24h || 0, average: coin.volume24h || 0 },\n    support_resistance: {\n      support: coin.price * 0.98,\n      resistance: coin.price * 1.02,\n      current_distance_to_resistance: 2,\n      current_distance_to_support: 2\n    },\n    timestamp: new Date().toISOString()\n  }));\n} else if (Array.isArray(batchData)) {\n  // Handle array format\n  analysisResults = batchData;\n} else {\n  // Create a default analysis result from available data\n  analysisResults = [{\n    symbol: batchData.symbol || 'BTCUSDT',\n    currentPrice: batchData.price || batchData.currentPrice || 50000,\n    rsi: batchData.rsi || 50,\n    macd: batchData.macd || { macd: 0, signal: 0, histogram: 0 },\n    candlestick_patterns: batchData.candlestick_patterns || ['NONE'],\n    engulfing: batchData.engulfing || { bullish: false, bearish: false, pattern: 'NONE' },\n    volumeSpike: batchData.volumeSpike || { spike: false, ratio: 1, current: 0, average: 0 },\n    support_resistance: batchData.support_resistance || {\n      support: (batchData.price || 50000) * 0.98,\n      resistance: (batchData.price || 50000) * 1.02,\n      current_distance_to_resistance: 2,\n      current_distance_to_support: 2\n    },\n    timestamp: new Date().toISOString()\n  }];\n}\n\n// Process all tokens from batch as individual items\n// This ensures each token gets proper sentiment analysis\nfor (const result of analysisResults) {\n  if (result && (result.symbol || result.coin)) {\n    const symbol = result.symbol || result.coin || 'BTCUSDT';\n    const currentPrice = result.currentPrice || result.price || result.lastPrice || 50000;\n    \n    // Format each token for sentiment analysis compatibility\n    results.push({\n      json: {\n        symbol: symbol,\n        currentPrice: currentPrice,\n        rsi: result.rsi || 50,\n        macd: result.macd || { macd: 0, signal: 0, histogram: 0 },\n        candlestick_patterns: result.candlestick_patterns || ['NONE'],\n        engulfing: result.engulfing || { bullish: false, bearish: false, pattern: 'NONE' },\n        volumeSpike: result.volumeSpike || { spike: false, ratio: 1, current: 0, average: 0 },\n        support_resistance: result.support_resistance || {\n          support: currentPrice * 0.98,\n          resistance: currentPrice * 1.02,\n          current_distance_to_resistance: 2,\n          current_distance_to_support: 2\n        },\n        timestamp: result.timestamp || new Date().toISOString(),\n        // Store batch info for potential use\n        batch_info: {\n          total_analyzed: batchData.analyzed_count || analysisResults.length,\n          batch_number: batchData.batch_number || 1,\n          total_batches: batchData.total_batches || 1\n        }\n      }\n    });\n  }\n}\n\n// If no results found, create a default one to prevent workflow failure\nif (results.length === 0) {\n  console.log('No analysis results found, creating default result');\n  results.push({\n    json: {\n      symbol: 'BTCUSDT',\n      currentPrice: 50000,\n      rsi: 50,\n      macd: { macd: 0, signal: 0, histogram: 0 },\n      candlestick_patterns: ['NONE'],\n      engulfing: { bullish: false, bearish: false, pattern: 'NONE' },\n      volumeSpike: { spike: false, ratio: 1, current: 0, average: 0 },\n      support_resistance: {\n        support: 49000,\n        resistance: 51000,\n        current_distance_to_resistance: 2,\n        current_distance_to_support: 2\n      },\n      timestamp: new Date().toISOString(),\n      batch_info: {\n        total_analyzed: 1,\n        batch_number: 1,\n        total_batches: 1\n      }\n    }\n  });\n}\n\nconsole.log('Processing results:', results.length, 'items');\n\n// Return all individual items for downstream processing\nreturn results;"
+      },
+      "name": "TA+Pattern+Volume",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -100,
+        180
+      ],
+      "id": "29a5ff48-49cb-41dd-b6d5-45d7c8120bef"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every 3 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Fetch All Bybit Futures",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch All Bybit Futures": {
+      "main": [
+        [
+          {
+            "node": "Filter Altcoins",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Altcoins": {
+      "main": [
+        [
+          {
+            "node": "Split Altcoins for Scanning",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Altcoins for Scanning": {
+      "main": [
+        [
+          {
+            "node": "Loop Altcoin Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Altcoin Batches": {
+      "main": [
+        [
+          {
+            "node": "Fetch 24h Tickers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch 24h Tickers": {
+      "main": [
+        [
+          {
+            "node": "Score Altcoins",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score Altcoins": {
+      "main": [
+        [
+          {
+            "node": "Create Dynamic Watchlist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Dynamic Watchlist": {
+      "main": [
+        [
+          {
+            "node": "Split Watchlist Symbols",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Watchlist Symbols": {
+      "main": [
+        [
+          {
+            "node": "Create Analysis Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Analysis Batches": {
+      "main": [
+        [
+          {
+            "node": "Loop Analysis Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Analysis Batches": {
+      "main": [
+        [
+          {
+            "node": "Batch Fetch OHLCV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Batch Fetch OHLCV": {
+      "main": [
+        [
+          {
+            "node": "Batch TA+Patterns Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Batch TA+Patterns Analysis": {
+      "main": [
+        [
+          {
+            "node": "TA+Pattern+Volume",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TA+Pattern+Volume": {
+      "main": [
+        [
+          {
+            "node": "FinBERT Sentiment Analysis",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "BERT Multilingual Sentiment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FinBERT Sentiment Analysis": {
+      "main": [
+        [
+          {
+            "node": "Merge Sentiments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "BERT Multilingual Sentiment": {
+      "main": [
+        [
+          {
+            "node": "Merge Sentiments",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Sentiments": {
+      "main": [
+        [
+          {
+            "node": "Combine Sentiment Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine Sentiment Analysis": {
+      "main": [
+        [
+          {
+            "node": "Groq AI Enhanced Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq AI Enhanced Decision": {
+      "main": [
+        [
+          {
+            "node": "Parse Enhanced AI Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Enhanced AI Decision": {
+      "main": [
+        [
+          {
+            "node": "Should Execute Trade?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Execute Trade?": {
+      "main": [
+        [
+          {
+            "node": "Telegram Enhanced Alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prepare Bybit Order with Auth",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram No Trade Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Bybit Order with Auth": {
+      "main": [
+        [
+          {
+            "node": "Bybit Auto Order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Enhanced Alert": {
+      "main": [
+        [
+          {
+            "node": "Log to Google Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bybit Auto Order": {
+      "main": [
+        [
+          {
+            "node": "Set TP/SL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set TP/SL": {
+      "main": [
+        [
+          {
+            "node": "Log to Google Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram No Trade Alert": {
+      "main": [
+        [
+          {
+            "node": "Log to Google Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "c55d7d14-d8cf-43d6-8a1a-7586e88dfb11",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "2bfda59c3ddf8b39aca44501ec60feb331c63bedc7484b3d5bc23b8e4fb6c91e"
+  },
+  "id": "OBZt6GYJnvjZnbjg",
+  "tags": []
+}
